@@ -21,16 +21,16 @@
 │  ├────────────────────────┤  │                    │  └───────────┬────────────┘  │
 │  │ Dual-Axis Joystick     │──┼──HTTP /control────►│              │               │
 │  │ (custom Canvas view)   │  │  ?l=±255&r=±255   │  ┌───────────▼────────────┐  │
-│  ├────────────────────────┤  │                    │  │ Frame Buffer (mutex)   │  │
+│  ├────────────────────────┤  │  &s=<seq>          │  │ Frame Buffer (mutex)   │  │
 │  │ Connection Screen      │  │                    │  │ JPEG Encoder           │  │
 │  │ (IP entry + connect)   │  │                    │  └───────────▲────────────┘  │
 │  └────────────────────────┘  │                    │              │               │
 │                              │                    │  ┌───────────┴────────────┐  │
 │  Dependencies:               │                    │  │ I2S Parallel DMA       │  │
 │  - OkHttp                    │                    │  │ (PCLK-gated capture)   │  │
-│  - Custom JoystickView       │                    │  └───────────▲────────────┘  │
-└──────────────────────────────┘                    │              │               │
-                                                    │  ┌───────────┴────────────┐  │
+│  - Material Components       │                    │  └───────────▲────────────┘  │
+│  - Custom JoystickView       │                    │              │               │
+└──────────────────────────────┘                    │  ┌───────────┴────────────┐  │
                                                     │  │ OV7670 Camera (raw)    │  │
                                                     │  │ XCLK←LEDC, SCCB←I2C   │  │
                                                     │  │ D0-D7→I2S parallel in  │  │
@@ -49,7 +49,11 @@
 ```
 esp32-rc-car/
 ├── plan.md
-├── esp32-firmware/                  # ESP-IDF v5.x project
+├── .envrc                           # direnv: activates .venv
+├── requirements.txt                 # Pillow (for test_server.py)
+├── test_server.py                   # Python HTTP server simulating ESP32 firmware
+│
+├── esp32-firmware/                  # TODO — ESP-IDF v5.x project (NEXT STEP)
 │   ├── CMakeLists.txt
 │   ├── sdkconfig
 │   └── main/
@@ -62,39 +66,156 @@ esp32-rc-car/
 │       ├── http_server.c / .h       # MJPEG stream + motor control endpoints
 │       └── motor_control.c / .h     # LEDC PWM, tank mix, watchdog, ramping
 │
-└── android-app/                     # Native Android (Kotlin)
+└── android/                         # Native Android (Kotlin) — IMPLEMENTED
     ├── build.gradle.kts
     ├── settings.gradle.kts
     ├── gradle.properties
+    ├── gradlew / gradlew.bat
+    ├── gradle/
+    │   ├── libs.versions.toml       # Gradle version catalog
+    │   └── wrapper/
     └── app/
         ├── build.gradle.kts
+        ├── proguard-rules.pro
         └── src/main/
             ├── AndroidManifest.xml
             ├── java/com/esp32rc/
-            │   ├── MainActivity.kt
-            │   ├── ConnectActivity.kt
-            │   ├── ControlActivity.kt
+            │   ├── ConnectActivity.kt      # LAUNCHER — IP/port entry, probes /status
+            │   ├── ControlActivity.kt      # Fullscreen landscape, MJPEG + joystick
             │   ├── ui/
-            │   │   └── JoystickView.kt
+            │   │   └── JoystickView.kt     # Custom Canvas dual-axis joystick
             │   ├── network/
-            │   │   ├── MjpegStreamer.kt
-            │   │   └── MotorClient.kt
+            │   │   ├── MjpegStreamer.kt    # HttpURLConnection-based MJPEG decoder
+            │   │   └── MotorClient.kt      # OkHttp fire-and-forget with seq numbers
             │   └── model/
-            │       └── MotorCommand.kt
+            │       └── MotorCommand.kt     # Data class + tank-mix math
             └── res/
                 ├── layout/
                 │   ├── activity_connect.xml
                 │   └── activity_control.xml
+                ├── drawable/
+                │   └── ic_car.xml
                 └── values/
                     ├── strings.xml
-                    └── colors.xml
+                    ├── colors.xml
+                    └── themes.xml
 ```
 
 ---
 
-## 1. ESP32 Firmware (ESP-IDF v5.x)
+## 0. Test Server (Python)
 
-### 1.1 GPIO Pin Map
+`test_server.py` is a Python HTTP server that simulates the ESP32 firmware — enables testing the Android app without hardware.
+
+- **Run**: `./.venv/bin/python test_server.py` (binds `0.0.0.0:8080` by default)
+- **Dependency**: `requirements.txt` → Pillow >=11.0.0 (generates synthetic 176×144 JPEG frames)
+- **Virtualenv**: `.envrc` activates `.venv/` via direnv
+
+### Endpoints
+
+| Path | Description |
+|------|-------------|
+| `/status` | JSON: `{"fps", "clients", "uptime", "left", "right", "resolution"}` |
+| `/control?l=<N>&r=<N>&s=<seq>` | Accepts motor speeds (-255..255). Sequence number `s` deduplicates stale commands. |
+| `/stream` | MJPEG stream (`multipart/x-mixed-replace; boundary=FRAME`), 15 FPS synthetic frames with motor visualization |
+
+### CLI
+```bash
+# start the test server
+./.venv/bin/python test_server.py
+
+# custom port
+./.venv/bin/python test_server.py --port 9000
+```
+
+---
+
+## 1. Android App (Kotlin, min SDK 26) — IMPLEMENTED
+
+### 1.1 Build System
+
+- **Gradle**: wrapper 9.4.1, AGP 9.2.1, Java 11
+- **compileSdk**: 36, **minSdk**: 26, **targetSdk**: 36
+- **Dependency management**: Gradle version catalog at `gradle/libs.versions.toml`
+
+### Dependencies
+
+| Library | Version | Used for |
+|---------|---------|----------|
+| `androidx.core:core-ktx` | 1.12.0 | Core Android extensions |
+| `androidx.appcompat:appcompat` | 1.6.1 | AppCompat theme, dark status bar |
+| `com.google.android.material:material` | 1.11.0 | MaterialButton, TextInputLayout, Snackbar, CardView |
+| `com.squareup.okhttp3:okhttp` | 4.12.0 | MotorClient HTTP calls |
+
+### Manifest
+
+- Permissions: `INTERNET`, `ACCESS_NETWORK_STATE`, `ACCESS_WIFI_STATE`
+- `android:usesCleartextTraffic="true"` (HTTP to ESP32/test server)
+- `ConnectActivity` is MAIN/LAUNCHER
+- `ControlActivity` is landscape-locked, fullscreen theme, handles config changes
+
+### 1.2 Activities
+
+#### `ConnectActivity` — Connection Screen
+- Validates IP with `Patterns.IP_ADDRESS`, port must be 1–65535
+- Persists last-used IP/port in `SharedPreferences`
+- Probes `/status` via OkHttp before navigating — shows Snackbar on failure
+- Passes IP + port as Intent extras to `ControlActivity`
+
+#### `ControlActivity` — Main Driving Screen
+- **Layout**: `FrameLayout` with `ImageView` (match_parent, fitCenter) + `JoystickView` (bottom-start, 180dp)
+- **Orientation**: landscape, fullscreen immersive (transient bars by swipe)
+- **Screen-on**: `android:keepScreenOn="true"` on root layout
+- **Command loop**: Handler-based 100ms ticker sends keep-alive commands
+  - 20ms minimum interval between unique commands
+  - On pause: sends zero command, stops stream
+  - On stop: shuts down MotorClient
+
+### 1.3 UI Components
+
+#### `JoystickView` — Custom Canvas View
+- Renders outer circle (base) + inner thumb circle
+- Touch handling: `ACTION_DOWN`/`ACTION_MOVE` clamp to base radius, `ACTION_UP` snaps to center
+- Callback: `onJoystickChanged(x: Float, y: Float)` — normalized coords (-1..1)
+- In-view debug text shows computed L/R values
+- **Tank mixing lives in `MotorCommand.fromJoystick()`**, not in JoystickView:
+  ```
+  forward = -y * 255
+  turn    =  x * 255
+  left    = forward + turn   (clamped ±255)
+  right   = forward - turn   (clamped ±255)
+  ```
+
+### 1.4 Network Layer
+
+#### `MjpegStreamer` — Thread-based, uses `HttpURLConnection`
+- Runs on a named thread (`"MjpegStreamer"`)
+- Parses `boundary=` from Content-Type header
+- Reads frame-by-frame via manual boundary-scanning (no OkHttp MultipartReader)
+- Posts decoded `Bitmap` to main thread via `Handler`
+- Auto-reconnects with 1s delay on error/disconnect
+- `onError` callback for UI status
+- Call `stopStream()` → sets `@Volatile running = false`
+
+#### `MotorClient` — OkHttp, fire-and-forget
+- Sends `GET /control?l=<L>&r=<R>&s=<seq>` with incrementing sequence numbers (`AtomicLong`)
+- Sequence numbers allow the server (real ESP32 or test_server.py) to drop stale/delayed commands
+- 1s connect/read timeouts
+- `shutdown()` cleans up dispatcher executor + connection pool
+
+### 1.5 Lifecycle
+
+| State | Action |
+|-------|--------|
+| onResume | Create MotorClient, start MJPEG stream thread, start command ticker |
+| onPause | Send zero command, stop stream, remove ticker callbacks |
+| onStop | Call `motorClient.shutdown()`, null ref |
+
+---
+
+## 2. ESP32 Firmware (ESP-IDF v5.x) — TODO
+
+### 2.1 GPIO Pin Map
 
 | Signal        | GPIO | Peripheral      | Notes                           |
 |--------------|------|-----------------|---------------------------------|
@@ -117,7 +238,7 @@ esp32-rc-car/
 | MX1508 IN3   | 25   | LEDC ch 2       | Right motor forward             |
 | MX1508 IN4   | 26   | LEDC ch 3       | Right motor reverse             |
 
-### 1.2 Firmware Modules
+### 2.2 Firmware Modules
 
 #### `main.c` — Entry Point
 - Initialize NVS flash
@@ -178,8 +299,10 @@ esp32-rc-car/
   - Loop: take mutex, copy latest JPEG frame, release mutex, send chunk via `httpd_resp_send_chunk()`
   - Re-check for new frame every 10ms
   - Send empty chunk as heartbeat if no new frame (keeps connection alive)
-- **`/control?l=<N>&r=<N>`** — GET handler:
-  - Parse `l` and `r` params (int, -255 to 255)
+  - Support `?s=<seq>` query param — drop stale frames (seq ≤ lastSeq)
+- **`/control?l=<N>&r=<N>&s=<seq>`** — GET handler:
+  - Parse `l`, `r` (int, -255 to 255) and `s` (unsigned long, sequence number)
+  - Drop if `s <= lastSeq` (prevent out-of-order execution)
   - Update global `motor_left_speed` and `motor_right_speed`
   - Reset watchdog timer
   - Return 200
@@ -196,7 +319,7 @@ esp32-rc-car/
 - `motor_stop()`: all pins low
 - Watchdog: `motor_watchdog_task` checks `last_command_ms`, calls `motor_stop()` if > 500ms
 
-### 1.3 Build & Flash
+### 2.3 Build & Flash
 ```bash
 cd esp32-firmware
 idf.py set-target esp32
@@ -205,7 +328,7 @@ idf.py build
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
 
-### 1.4 Performance Targets (QCIF 176×144)
+### 2.4 Performance Targets (QCIF 176×144)
 
 | Metric              | Target     |
 |--------------------|------------|
@@ -217,160 +340,36 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 ---
 
-## 2. Android App (Kotlin, min SDK 26)
-
-### 2.1 Dependencies
-
-```kotlin
-// app/build.gradle.kts
-dependencies {
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("androidx.core:core-ktx:1.12.0")
-    implementation("androidx.appcompat:appcompat:1.6.1")
-}
-```
-
-AndroidManifest.xml permissions:
-- `INTERNET`
-- `ACCESS_NETWORK_STATE`
-- `ACCESS_WIFI_STATE`
-- `KEEP_SCREEN_ON` (prevent screen sleep while driving)
-
-### 2.2 Screens
-
-#### `ConnectActivity` — Connection Screen
-- `EditText` for IP address (default hint: `192.168.4.1`)
-- `EditText` for port (default hint: `80`)
-- "Connect" button → starts `ControlActivity` with IP + port as Intent extras
-- If connection fails, show Snackbar with error
-
-#### `ControlActivity` — Main Driving Screen
-- `FrameLayout` root layout:
-  - **Layer 1**: `ImageView` (`match_parent`, scaleType `fitCenter`) — MJPEG video feed
-  - **Layer 2**: `JoystickView` (bottom center, 200dp, semi-transparent black)
-- On create: start `MjpegStreamer` thread with IP:port, start sending zero-commands
-
-### 2.3 UI Components
-
-#### `JoystickView` — Custom View
-- Extends `View`, renders with `Canvas`
-- Draw outer circle (base, 200dp diameter) + inner thumb circle (60dp)
-- Touch handling:
-  - `ACTION_DOWN` / `ACTION_MOVE`: compute normalized `(x, y)` from center, clamp to outer circle radius, map to `(-255..255, -255..255)`
-  - `ACTION_UP`: snap thumb to center, send `(0, 0)`
-- Calls `onJoystickChanged(left: Int, right: Int)` callback with tank-steer mixing:
-  ```
-  left  = y + x    // forward + turn
-  right = y - x    // forward - turn
-  ```
-  Clamp each to ±255
-- Throttle sends commands at ~100ms intervals (Handler + Runnable)
-
-### 2.4 Network Layer
-
-#### `MjpegStreamer` — MJPEG Decoder (runs on background thread)
-
-```kotlin
-class MjpegStreamer(
-    private val url: String,
-    private val onFrame: (Bitmap) -> Unit
-) : Thread() {
-    // 1. Open HttpURLConnection to url
-    // 2. Get InputStream
-    // 3. Parse multipart boundary from Content-Type header
-    // 4. Loop:
-    //    a. Read until boundary string
-    //    b. Read headers, extract Content-Length
-    //    c. Read Content-Length bytes into ByteArray
-    //    d. BitmapFactory.decodeByteArray(bytes, 0, length)
-    //    e. Post bitmap to main thread via Handler(Looper.getMainLooper())
-    //       call onFrame(bitmap) → set ImageView bitmap
-}
-```
-
-#### `MotorClient` — Motor Command Sender
-
-```kotlin
-class MotorClient(private val baseUrl: String) {
-    private val client = OkHttpClient()
-    
-    fun sendCommand(left: Int, right: Int) {
-        val url = "$baseUrl/control?l=$left&r=$right"
-        val request = Request.Builder().url(url).build()
-        client.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) { /* ignore */ }
-            override fun onResponse(call: Call, response: Response) { response.close() }
-        })
-    }
-}
-```
-
-- No retry necessary — next tick replaces stale command
-- Fire-and-forget pattern, no UI blocking
-
-### 2.5 Activity Lifecycle
-
-| State          | Action                                     |
-|---------------|--------------------------------------------|
-| onResume       | Connect MJPEG stream, start joystick timer |
-| onPause        | Send zero command, disconnect stream       |
-| onStop         | Stop all threads                           |
-| onDestroy      | Cleanup                                    |
-
-### 2.6 Screen Layouts
-
-#### `activity_connect.xml`
-```
-LinearLayout (vertical, center)
-├── ImageView (app icon, 80dp)
-├── TextView ("ESP32 RC Car")
-├── CardView
-│   └── LinearLayout (vertical)
-│       ├── TextInputLayout → EditText (IP)
-│       ├── TextInputLayout → EditText (Port)
-│       └── Button ("Connect")
-└── TextView (status, connection errors)
-```
-
-#### `activity_control.xml`
-```
-FrameLayout (match_parent)
-├── ImageView (match_parent, scaleType=fitCenter)
-└── com.esp32rc.ui.JoystickView
-    (layout_gravity=bottom|center_horizontal,
-     width=200dp, height=200dp,
-     marginBottom=32dp)
-```
-
----
-
 ## 3. Integration Testing Checklist
 
 - [ ] ESP32 boots, creates `esp32-rc-car` WiFi network
 - [ ] OV7670 initializes, I2C probe returns ACK
 - [ ] I2S DMA captures raw frames without buffer overrun
 - [ ] JPEG encoding produces valid images (verify via `/stream` in browser)
-- [ ] `/control?l=100&r=100` drives both motors forward
-- [ ] `/control?l=0&r=0` stops motors
+- [ ] `/control?l=100&r=100&s=1` drives both motors forward
+- [ ] `/control?l=0&r=0&s=2` stops motors
+- [ ] Sequence number dedup works (stale commands dropped)
 - [ ] Watchdog stops motors when no commands sent for 500ms
-- [ ] Android app connects to `192.168.4.1:80`
-- [ ] MJPEG stream displays in ImageView
-- [ ] Joystick drag sends correct `l`/`r` values
-- [ ] Joystick release sends `l=0&r=0`
-- [ ] Screen stays on while driving
-- [ ] App survives rotation without crashing
+- [x] Android app connects to `192.168.4.1:80` (verified with test_server.py)
+- [x] MJPEG stream displays in ImageView
+- [x] Joystick drag sends correct `l`/`r` values with sequence numbers
+- [x] Joystick release sends `l=0&r=0`
+- [x] Screen stays on while driving
+- [x] App survives rotation without crashing
+- [x] ConnectActivity validates IP and probes `/status` before navigating
 
 ---
 
 ## 4. Implementation Order
 
-1. **ESP32: WiFi AP** — get network up, verify connection from phone
-2. **ESP32: Motor control** — `motor_control.c`, test with `/control` from browser
-3. **ESP32: HTTP server skeleton** — `/status` endpoint first, then `/control`, then `/stream`
-4. **ESP32: OV7670 driver** — I2C init, I2S DMA, frame capture, verify with logic analyzer or serial debug
-5. **ESP32: JPEG encoder** — integrate, test `/stream` in desktop browser
-6. **Android: ConnectActivity** — UI, navigation to ControlActivity
-7. **Android: MjpegStreamer** — connect to ESP32 `/stream`, show video
-8. **Android: JoystickView** — rendering + touch + tank mix
-9. **Android: MotorClient** — wire joystick output to HTTP commands
-10. **End-to-end test** — drive the car via WiFi with video feed
+1. **[done]** **Android: ConnectActivity** — IP/port entry, `/status` probe, navigation
+2. **[done]** **Android: MjpegStreamer** — connect to `/stream`, show video
+3. **[done]** **Android: JoystickView** — rendering + touch + tank mix in MotorCommand
+4. **[done]** **Android: MotorClient** — sequence-numbered fire-and-forget commands
+5. **[done]** **Python test server** — simulate ESP32 HTTP endpoints for app testing
+6. **ESP32: WiFi AP** — get network up, verify connection from phone
+7. **ESP32: Motor control** — `motor_control.c`, test with `/control` from browser
+8. **ESP32: HTTP server skeleton** — `/status` endpoint first, then `/control`, then `/stream` (with seq dedup)
+9. **ESP32: OV7670 driver** — I2C init, I2S DMA, frame capture
+10. **ESP32: JPEG encoder** — integrate, test `/stream` in desktop browser
+11. **End-to-end test** — drive the car via WiFi with video feed
