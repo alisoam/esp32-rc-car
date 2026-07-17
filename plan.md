@@ -12,36 +12,36 @@
 ## Architecture Overview
 
 ```
-┌──────────────────────────────┐     WiFi (AP)     ┌──────────────────────────────┐
-│  Android App (Kotlin)        │ ◄───────────────► │  ESP32 (ESP-IDF v5.x)        │
-│                              │                    │                              │
-│  ┌────────────────────────┐  │  HTTP /stream      │  ┌────────────────────────┐  │
-│  │ MJPEG Stream Viewer    │◄─┼────────────────────┼──│ HTTP Server            │  │
-│  │ (fullscreen ImageView) │  │  multipart/x-mixed │  │ /stream /control /status│  │
-│  ├────────────────────────┤  │                    │  └───────────┬────────────┘  │
-│  │ Dual-Axis Joystick     │──┼──HTTP /control────►│              │               │
-│  │ (custom Canvas view)   │  │  ?l=±255&r=±255   │  ┌───────────▼────────────┐  │
-│  ├────────────────────────┤  │  &s=<seq>          │  │ Frame Buffer (mutex)   │  │
-│  │ Connection Screen      │  │                    │  │ JPEG Encoder           │  │
-│  │ (IP entry + connect)   │  │                    │  └───────────▲────────────┘  │
-│  └────────────────────────┘  │                    │              │               │
-│                              │                    │  ┌───────────┴────────────┐  │
-│  Dependencies:               │                    │  │ I2S Parallel DMA       │  │
-│  - OkHttp                    │                    │  │ (PCLK-gated capture)   │  │
-│  - Material Components       │                    │  └───────────▲────────────┘  │
-│  - Custom JoystickView       │                    │              │               │
-└──────────────────────────────┘                    │  ┌───────────┴────────────┐  │
-                                                    │  │ OV7670 Camera (raw)    │  │
-                                                    │  │ XCLK←LEDC, SCCB←I2C   │  │
-                                                    │  │ D0-D7→I2S parallel in  │  │
-                                                    │  │ HREF/VSYNC→GPIO ISRs   │  │
-                                                    │  └────────────────────────┘  │
-                                                    │  ┌────────────────────────┐  │
-                                                    │  │ MX1508 Motor Driver    │  │
-                                                    │  │ 4×LEDC PWM channels    │  │
-                                                    │  │ Watchdog stop @ 500ms  │  │
-                                                    │  └────────────────────────┘  │
-                                                    └──────────────────────────────┘
+┌──────────────────────────────┐     WiFi (AP)     ┌────────────────────────────────┐
+│  Android App (Kotlin)        │ ◄───────────────► │  ESP32 (ESP-IDF v5.x)          │
+│                              │                   │                                │
+│  ┌────────────────────────┐  │ HTTP /stream      │  ┌──────────────────────────┐  │
+│  │ MJPEG Stream Viewer    │◄─┼───────────────────┼──│ HTTP Server              │  │
+│  │ (fullscreen ImageView) │  │ multipart/x-mixed │  │ /stream /control /status │  │
+│  ├────────────────────────┤  │                   │  └───────────┬──────────────┘  │
+│  │ Dual-Axis Joystick     │──┼─HTTP /control────►│              │                 │
+│  │ (custom Canvas view)   │  │ ?l=±255&r=±255    │  ┌───────────▼──────────────┐  │
+│  ├────────────────────────┤  │ &s=<seq>          │  │ Frame Buffer (mutex)     │  │
+│  │ Connection Screen      │  │                   │  │ JPEG Encoder             │  │
+│  │ (IP entry + connect)   │  │                   │  └───────────▲──────────────┘  │
+│  └────────────────────────┘  │                   │              │                 │
+│                              │                   │  ┌───────────┴──────────────┐  │
+│  Dependencies:               │                   │  │ I2S Parallel DMA         │  │
+│  - OkHttp                    │                   │  │ (PCLK-gated capture)     │  │
+│  - Material Components       │                   │  └───────────▲──────────────┘  │
+│  - Custom JoystickView       │                   │              │                 │
+└──────────────────────────────┘                   │  ┌───────────┴──────────────┐  │
+                                                   │  │ OV7670 Camera (raw)      │  │
+                                                   │  │ XCLK←LEDC, SCCB←I2C      │  │
+                                                   │  │ D0-D7→I2S parallel in    │  │
+                                                   │  │ HREF/VSYNC→GPIO ISRs     │  │
+                                                   │  └──────────────────────────┘  │
+                                                   │  ┌──────────────────────────┐  │
+                                                   │  │ MX1508 Motor Driver      │  │
+                                                   │  │ 4×LEDC PWM channels      │  │
+                                                   │  │ Watchdog stop @ 500ms    │  │
+                                                   │  └──────────────────────────┘  │
+                                                   └────────────────────────────────┘
 ```
 
 ## Project Structure
