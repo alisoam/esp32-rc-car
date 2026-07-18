@@ -53,7 +53,7 @@ esp32-rc-car/
 ├── requirements.txt                 # Pillow (for test_server.py)
 ├── test_server.py                   # Python HTTP server simulating ESP32 firmware
 │
-├── esp32-firmware/                  # TODO — ESP-IDF v5.x project (NEXT STEP)
+├── esp32/                          # ESP-IDF v5.x project (IN PROGRESS)
 │   ├── CMakeLists.txt
 │   ├── sdkconfig
 │   └── main/
@@ -321,7 +321,7 @@ esp32-rc-car/
 
 ### 2.3 Build & Flash
 ```bash
-cd esp32-firmware
+cd esp32
 idf.py set-target esp32
 idf.py menuconfig   # verify flash size, CPU freq 240 MHz
 idf.py build
@@ -367,9 +367,9 @@ idf.py -p /dev/ttyUSB0 flash monitor
 3. **[done]** **Android: JoystickView** — rendering + touch + tank mix in MotorCommand
 4. **[done]** **Android: MotorClient** — sequence-numbered fire-and-forget commands
 5. **[done]** **Python test server** — simulate ESP32 HTTP endpoints for app testing
-6. **ESP32: WiFi AP** — get network up, verify connection from phone
-7. **ESP32: Motor control** — `motor_control.c`, test with `/control` from browser
-8. **ESP32: HTTP server skeleton** — `/status` endpoint first, then `/control`, then `/stream` (with seq dedup)
+6. **[done]** **ESP32: WiFi AP** — get network up, verify connection from phone
+7. **ESP32: Motor control** — `motor_control.c`, test with `/control` from browser (NEXT)
+8. **[done]** **ESP32: HTTP server skeleton** — `/status` + `/control` + `/stream` stubs (seq dedup live)
 9. **ESP32: OV7670 driver** — I2C init, I2S DMA, frame capture
 10. **ESP32: JPEG encoder** — integrate, test `/stream` in desktop browser
 11. **End-to-end test** — drive the car via WiFi with video feed

@@ -25,7 +25,7 @@ esp32-rc-car/
 │       └── src/main/
 │           ├── AndroidManifest.xml
 │           └── java/com/esp32rc/  # package: com.esp32rc
-└── esp32-firmware/               # TODO — not created yet
+└── esp32/                       # ESP-IDF v5.x project (IN PROGRESS)
 ```
 
 ## How to run
@@ -89,7 +89,7 @@ right   = clamp(forward - turn, -255, 255)
 
 ### ESP32 firmware conventions (planned)
 When implementing firmware:
-- ESP-IDF v5.x project at `esp32-firmware/`
+- ESP-IDF v5.x project at `esp32/`
 - Module-per-concern: `wifi_ap.c/.h`, `ov7670.c/.h`, `motor_control.c/.h`, etc.
 - HTTP server uses built-in `esp_http_server` (no external HTTP lib)
 - All endpoints support `s=<seq>` query param for command dedup
