@@ -26,9 +26,9 @@ static struct {
     httpd_handle_t hd;
     int            fd;
     bool           active;
-    int            generation;
     SemaphoreHandle_t lock;
-} ws_state = { .fd = -1, .active = false, .generation = 0 };
+    SemaphoreHandle_t conn_sem;
+} ws_state = { .fd = -1, .active = false };
 
 static void set_motor(int32_t l, int32_t r, uint64_t s)
 {
@@ -43,22 +43,21 @@ static void ws_stream_task(void *arg)
 {
     (void)arg;
     int frame_count = 0;
-    int my_generation;
     int send_fail_count = 0;
-
-    xSemaphoreTake(ws_state.lock, portMAX_DELAY);
-    my_generation = ws_state.generation;
-    xSemaphoreGive(ws_state.lock);
 
     while (1) {
         xSemaphoreTake(ws_state.lock, portMAX_DELAY);
         bool active = ws_state.active;
         httpd_handle_t hd = ws_state.hd;
         int fd = ws_state.fd;
-        int gen = ws_state.generation;
         xSemaphoreGive(ws_state.lock);
 
-        if (!active || gen != my_generation) break;
+        if (!active) {
+            frame_count = 0;
+            send_fail_count = 0;
+            xSemaphoreTake(ws_state.conn_sem, portMAX_DELAY);
+            continue;
+        }
 
         camera_frame_t frame = camera_frame_generate(
             motor_left_speed, motor_right_speed, frame_count);
@@ -95,38 +94,30 @@ static void ws_stream_task(void *arg)
             }
         }
 
-        if (!send_ok) break;
+        if (!send_ok) {
+            xSemaphoreTake(ws_state.lock, portMAX_DELAY);
+            ws_state.active = false;
+            ws_state.hd = NULL;
+            ws_state.fd = -1;
+            xSemaphoreGive(ws_state.lock);
+            ESP_LOGI(TAG, "ws stream: send failed, disconnecting");
+            continue;
+        }
 
         frame_count++;
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
-
-    ESP_LOGI(TAG, "ws stream gen=%d exiting", my_generation);
-    vTaskDelete(NULL);
 }
 
 static esp_err_t ws_post_handshake_cb(httpd_req_t *req)
 {
     xSemaphoreTake(ws_state.lock, portMAX_DELAY);
-    ws_state.active = false;
-    ws_state.generation++;
     ws_state.hd = req->handle;
     ws_state.fd = httpd_req_to_sockfd(req);
     ws_state.active = true;
     xSemaphoreGive(ws_state.lock);
-
-    BaseType_t ret = xTaskCreate(ws_stream_task, "ws_stream", 2048, NULL, 4, NULL);
-    if (ret != pdPASS) {
-        xSemaphoreTake(ws_state.lock, portMAX_DELAY);
-        ws_state.active = false;
-        ws_state.hd = NULL;
-        ws_state.fd = -1;
-        xSemaphoreGive(ws_state.lock);
-        ESP_LOGE(TAG, "ws stream task create failed, free=%d",
-                 (int)esp_get_free_heap_size());
-        return ESP_FAIL;
-    }
-    ESP_LOGI(TAG, "ws connected gen=%d", ws_state.generation);
+    xSemaphoreGive(ws_state.conn_sem);
+    ESP_LOGI(TAG, "ws connected fd=%d", ws_state.fd);
     return ESP_OK;
 }
 
@@ -140,6 +131,8 @@ static esp_err_t ws_handler(httpd_req_t *req)
     if (ws_pkt.type == HTTPD_WS_TYPE_CLOSE) {
         xSemaphoreTake(ws_state.lock, portMAX_DELAY);
         ws_state.active = false;
+        ws_state.hd = NULL;
+        ws_state.fd = -1;
         xSemaphoreGive(ws_state.lock);
         ESP_LOGI(TAG, "ws disconnected (close)");
         return ESP_OK;
@@ -179,7 +172,8 @@ static const httpd_uri_t uri_handlers[] = {
 void http_server_start(void)
 {
     ws_state.lock = xSemaphoreCreateMutex();
-    assert(ws_state.lock);
+    ws_state.conn_sem = xSemaphoreCreateBinary();
+    assert(ws_state.lock && ws_state.conn_sem);
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port      = 80;
@@ -196,6 +190,9 @@ void http_server_start(void)
     for (size_t i = 0; i < sizeof(uri_handlers) / sizeof(uri_handlers[0]); i++) {
         ESP_ERROR_CHECK(httpd_register_uri_handler(server, &uri_handlers[i]));
     }
+
+    BaseType_t ret = xTaskCreate(ws_stream_task, "ws_stream", 4096, NULL, 4, NULL);
+    assert(ret == pdPASS);
 
     ESP_LOGI(TAG, "server ready: WS /ws");
 }
