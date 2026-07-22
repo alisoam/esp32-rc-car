@@ -2,6 +2,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "led_strip.h"
@@ -12,11 +13,15 @@
 #define RGB_LED_BRIGHTNESS   32
 
 static led_strip_handle_t s_strip;
+static SemaphoreHandle_t s_strip_mutex;
 
 static void set_rgb(uint8_t r, uint8_t g, uint8_t b)
 {
+    if (!s_strip_mutex) return;
+    xSemaphoreTake(s_strip_mutex, portMAX_DELAY);
     led_strip_set_pixel(s_strip, 0, r, g, b);
     led_strip_refresh(s_strip);
+    xSemaphoreGive(s_strip_mutex);
 }
 
 void led_set_motor(int left, int right)
@@ -54,6 +59,9 @@ static void heartbeat_task(void *arg)
 
 void led_heartbeat_init(void)
 {
+    s_strip_mutex = xSemaphoreCreateMutex();
+    assert(s_strip_mutex);
+
     led_strip_config_t strip_config = {
         .strip_gpio_num = RGB_LED_GPIO,
         .max_leds = 1,

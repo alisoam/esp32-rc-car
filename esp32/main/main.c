@@ -25,6 +25,7 @@ void app_main(void)
 
     led_heartbeat_init();
     motor_control_init();
+    camera_frame_init();
     camera_frame_init_real();
 
     wifi_ap_init();

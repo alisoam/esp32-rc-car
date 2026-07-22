@@ -208,46 +208,6 @@ static camera_frame_t camera_frame_generate_synthetic(int32_t left_motor, int32_
     uint8_t bg_b = 30 + (uint8_t)(10 * sin(elapsed * 0.4 + 2));
     fill_rect(0, 0, SYNTH_WIDTH, SYNTH_HEIGHT, bg_r, bg_g, bg_b);
 
-    draw_text(8, 8, "CAMERA LIVE", 79, 195, 247, 2);
-
-    char buf[32];
-    snprintf(buf, sizeof(buf), "L %+4ld", (long)left_motor);
-    draw_text(8, 28, buf, left_motor > 0 ? 0 : (left_motor < 0 ? 255 : 80),
-              left_motor > 0 ? 200 : 0, left_motor != 0 ? 255 : 80, 2);
-
-    snprintf(buf, sizeof(buf), "R %+4ld", (long)right_motor);
-    draw_text(8, 44, buf, right_motor > 0 ? 0 : (right_motor < 0 ? 255 : 80),
-              right_motor > 0 ? 200 : 0, right_motor != 0 ? 255 : 80, 2);
-
-    snprintf(buf, sizeof(buf), "FR %d", frame_count);
-    draw_text(8, 62, buf, 180, 180, 180, 1);
-
-    int bx = (int)(10 + (SYNTH_WIDTH - 30) * (0.5 + 0.5 * sin(elapsed * 2.0)));
-    int by = (int)(SYNTH_HEIGHT - 30 + 10 * cos(elapsed * 1.5));
-    fill_rect(bx, by, 14, 14, 79, 195, 247);
-
-    int bar_x = 8;
-    int bar_y = 104;
-    int bar_w = SYNTH_WIDTH - 16;
-    int bar_h = 10;
-
-    fill_rect(bar_x, bar_y, bar_w, bar_h, 40, 40, 40);
-    int l_len = (int)(labs((long)left_motor) * bar_w / 255);
-    if (left_motor > 0) {
-        fill_rect(bar_x, bar_y, l_len, bar_h, 0, 200, 0);
-    } else if (left_motor < 0) {
-        fill_rect(bar_x, bar_y, l_len, bar_h, 200, 0, 0);
-    }
-
-    bar_y += 16;
-    fill_rect(bar_x, bar_y, bar_w, bar_h, 40, 40, 40);
-    int r_len = (int)(labs((long)right_motor) * bar_w / 255);
-    if (right_motor > 0) {
-        fill_rect(bar_x, bar_y, r_len, bar_h, 0, 200, 0);
-    } else if (right_motor < 0) {
-        fill_rect(bar_x, bar_y, r_len, bar_h, 200, 0, 0);
-    }
-
     size_t out_size = jpeg_encoder_encode_rgb888(synth_jpeg_enc, rgb_buf, synth_jpg_buf, JPEG_MAX);
 
     camera_frame_t frame;

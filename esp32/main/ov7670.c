@@ -47,7 +47,7 @@ static const ov7670_reg_t ov7670_qcif_rgb565[] = {
 
 static const ov7670_reg_t ov7670_config_a[] = {
     // After reset, configure for QCIF RGB565 with internal clock
-    {0x12, 0x24}, // COM7: QCIF, RGB565 mode
+    {0x12, 0x04}, // COM7: CIF output format
     {0x11, 0x01}, // CLKRC: internal PCLK, no prescale
     {0x0C, 0x00}, // COM3: default, disable scaling
     {0x3E, 0x00}, // COM14: PCLK divider = 0, manual scaling
@@ -78,7 +78,7 @@ static const ov7670_reg_t ov7670_config_c[] = {
 
 static const ov7670_reg_t ov7670_config_d[] = {
     // AGC, AEC, AWB
-    {0x13, 0xE0}, // COM8: Enable AGC, AEC, AWB
+    {0x13, 0xE0}, // COM8: Enable AGC, AEC
     {0x00, 0x00}, // GAIN (AGC default)
     {0x10, 0x00}, // AECH
     {0x14, 0x38}, // COM9: Max AGC gain 4x, freeze AGC/AEC
@@ -146,12 +146,12 @@ esp_err_t ov7670_init(void)
     vTaskDelay(pdMS_TO_TICKS(100));
 
     // Configuration sequence
-    ESP_RETURN_ON_ERROR(ov7670_write_regs(ov7670_config_a, 4), TAG, "config a");
-    ESP_RETURN_ON_ERROR(ov7670_write_regs(ov7670_config_b, 6), TAG, "config b");
-    ESP_RETURN_ON_ERROR(ov7670_write_regs(ov7670_config_c, 5), TAG, "config c");
-    ESP_RETURN_ON_ERROR(ov7670_write_regs(ov7670_config_d, 4), TAG, "config d");
-    ESP_RETURN_ON_ERROR(ov7670_write_regs(ov7670_config_e, 9), TAG, "config e");
-    ESP_RETURN_ON_ERROR(ov7670_write_regs(ov7670_config_f, 1), TAG, "config f");
+    ESP_RETURN_ON_ERROR(ov7670_write_regs(ov7670_config_a, 6), TAG, "config a");
+    ESP_RETURN_ON_ERROR(ov7670_write_regs(ov7670_config_b, 7), TAG, "config b");
+    ESP_RETURN_ON_ERROR(ov7670_write_regs(ov7670_config_c, 6), TAG, "config c");
+    ESP_RETURN_ON_ERROR(ov7670_write_regs(ov7670_config_d, 5), TAG, "config d");
+    ESP_RETURN_ON_ERROR(ov7670_write_regs(ov7670_config_e, 10), TAG, "config e");
+    ESP_RETURN_ON_ERROR(ov7670_write_regs(ov7670_config_f, 2), TAG, "config f");
 
     esp_cam_ctlr_dvp_deinit(0);
 

@@ -8,7 +8,6 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "esp32s3/rom/cache.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -22,10 +21,7 @@
 static esp_cam_ctlr_handle_t cam_handle;
 static jpeg_encoder_t      *jpeg_enc;
 
-static uint8_t *raw_buf_a;
-static uint8_t *raw_buf_b;
-static uint8_t *fill_buf;
-static uint8_t *ready_buf;
+static uint8_t *cam_buffer;
 static uint8_t  jpg_buf[JPEG_MAX];
 static size_t   jpg_len;
 
@@ -33,6 +29,8 @@ static SemaphoreHandle_t frame_ready_sem;
 static SemaphoreHandle_t mutex;
 
 static bool cam_running;
+static volatile int vsync_count = 0;
+static volatile int trans_done_count = 0;
 
 static bool IRAM_ATTR on_get_new_trans(esp_cam_ctlr_handle_t handle,
                                         esp_cam_ctlr_trans_t *trans,
@@ -40,7 +38,8 @@ static bool IRAM_ATTR on_get_new_trans(esp_cam_ctlr_handle_t handle,
 {
     (void)handle;
     (void)user_data;
-    trans->buffer = fill_buf;
+    vsync_count++;
+    trans->buffer = cam_buffer;
     trans->buflen = RAW_SIZE;
     return false;
 }
@@ -51,13 +50,8 @@ static bool IRAM_ATTR on_trans_finished(esp_cam_ctlr_handle_t handle,
 {
     (void)handle;
     (void)user_data;
-    ready_buf = trans->buffer;
-
-    if (ready_buf == raw_buf_a) {
-        fill_buf = raw_buf_b;
-    } else {
-        fill_buf = raw_buf_a;
-    }
+    (void)trans;
+    trans_done_count++;
 
     BaseType_t woken = pdFALSE;
     xSemaphoreGiveFromISR(frame_ready_sem, &woken);
@@ -67,29 +61,41 @@ static bool IRAM_ATTR on_trans_finished(esp_cam_ctlr_handle_t handle,
 static void camera_task(void *arg)
 {
     (void)arg;
-    int64_t last_log = 0;
+    int frame_count = 0;
+    int timeout_count = 0;
 
     while (cam_running) {
-        if (xSemaphoreTake(frame_ready_sem, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        if (xSemaphoreTake(frame_ready_sem, pdMS_TO_TICKS(3000)) != pdTRUE) {
+            timeout_count++;
+            ESP_LOGW(TAG, "no frame in 3s (to=%d), vsync=%d done=%d frames=%d",
+                     timeout_count, vsync_count, trans_done_count, frame_count);
+
+            if (timeout_count >= 2) {
+                ESP_LOGW(TAG, "restarting camera...");
+                esp_cam_ctlr_stop(cam_handle);
+                vTaskDelay(pdMS_TO_TICKS(50));
+                esp_cam_ctlr_start(cam_handle);
+                vsync_count = 0;
+                trans_done_count = 0;
+                timeout_count = 0;
+            }
             continue;
         }
 
+        timeout_count = 0;
+        frame_count++;
         int64_t t0 = esp_timer_get_time();
-
-        Cache_Invalidate_Addr((uint32_t)(uintptr_t)ready_buf, RAW_SIZE);
 
         xSemaphoreTake(mutex, portMAX_DELAY);
         size_t sz = jpeg_encoder_encode_rgb565(jpeg_enc,
-                        (const uint16_t *)ready_buf, jpg_buf, JPEG_MAX);
+                        (const uint16_t *)cam_buffer, jpg_buf, JPEG_MAX);
         jpg_len = (sz > 0) ? sz : 0;
         xSemaphoreGive(mutex);
         int64_t t1 = esp_timer_get_time();
 
-        int64_t now = t1;
-        if (now - last_log > 2000000) {
-            ESP_LOGI(TAG, "encode %d bytes in %lld us",
-                     (int)jpg_len, t1 - t0);
-            last_log = now;
+        if (frame_count <= 5 || (frame_count % 60) == 0) {
+            ESP_LOGI(TAG, "frame %d: %d bytes in %lld us",
+                     frame_count, (int)jpg_len, t1 - t0);
         }
     }
 
@@ -103,22 +109,6 @@ esp_err_t ov7670_frame_init(void)
         ESP_LOGE(TAG, "jpeg encoder create failed");
         return ESP_FAIL;
     }
-
-    raw_buf_a = heap_caps_aligned_alloc(16, RAW_SIZE,
-                  MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-    raw_buf_b = heap_caps_aligned_alloc(16, RAW_SIZE,
-                  MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
-    if (!raw_buf_a || !raw_buf_b) {
-        ESP_LOGE(TAG, "raw buffer alloc failed");
-        jpeg_encoder_destroy(jpeg_enc);
-        jpeg_enc = NULL;
-        heap_caps_free(raw_buf_a);
-        heap_caps_free(raw_buf_b);
-        raw_buf_a = raw_buf_b = NULL;
-        return ESP_ERR_NO_MEM;
-    }
-    fill_buf  = raw_buf_a;
-    ready_buf = raw_buf_b;
 
     esp_cam_ctlr_dvp_pin_config_t pin = {
         .data_width = CAM_CTLR_DATA_WIDTH_8,
@@ -156,6 +146,19 @@ esp_err_t ov7670_frame_init(void)
         return ret;
     }
 
+    cam_buffer = esp_cam_ctlr_alloc_buffer(cam_handle, RAW_SIZE,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA);
+    if (!cam_buffer) {
+        ESP_LOGE(TAG, "cam buffer alloc failed");
+        esp_cam_ctlr_del(cam_handle);
+        cam_handle = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
+    size_t fb_len = 0;
+    esp_cam_ctlr_get_frame_buffer_len(cam_handle, &fb_len);
+    ESP_LOGI(TAG, "cam_buffer=%p raw_size=%d fb_size=%d", cam_buffer, RAW_SIZE, (int)fb_len);
+
     esp_cam_ctlr_evt_cbs_t cbs = {
         .on_get_new_trans = on_get_new_trans,
         .on_trans_finished = on_trans_finished,
@@ -171,7 +174,7 @@ esp_err_t ov7670_frame_init(void)
 
     cam_running = true;
     BaseType_t task_ret = xTaskCreatePinnedToCore(
-        camera_task, "camera", 4096, NULL, 5, NULL, 1);
+        camera_task, "camera", 4096, NULL, 5, NULL, 0);
     if (task_ret != pdPASS) {
         ESP_LOGE(TAG, "failed to create camera task");
         return ESP_FAIL;
@@ -203,13 +206,9 @@ void ov7670_frame_deinit(void)
         jpeg_encoder_destroy(jpeg_enc);
         jpeg_enc = NULL;
     }
-    if (raw_buf_a) {
-        heap_caps_free(raw_buf_a);
-        raw_buf_a = NULL;
-    }
-    if (raw_buf_b) {
-        heap_caps_free(raw_buf_b);
-        raw_buf_b = NULL;
+    if (cam_buffer) {
+        heap_caps_free(cam_buffer);
+        cam_buffer = NULL;
     }
     ESP_LOGI(TAG, "camera capture stopped");
 }

@@ -68,29 +68,7 @@ class ConnectActivity : AppCompatActivity() {
             .putInt(KEY_PORT, port)
             .apply()
 
-        connectButton.isEnabled = false
-        statusText.text = getString(R.string.status_checking)
-
-        val baseUrl = "http://$ip:$port"
-        val request = Request.Builder().url("$baseUrl/status").build()
-        client.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                runOnUiThread {
-                    connectButton.isEnabled = true
-                    statusText.text = ""
-                    showError(getString(R.string.error_connect_failed, baseUrl))
-                }
-            }
-
-            override fun onResponse(call: Call, response: Response) {
-                response.close()
-                runOnUiThread {
-                    connectButton.isEnabled = true
-                    statusText.text = ""
-                    startControl(ip, port)
-                }
-            }
-        })
+        startControl(ip, port)
     }
 
     private fun startControl(ip: String, port: Int) {
