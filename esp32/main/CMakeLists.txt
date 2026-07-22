@@ -7,6 +7,8 @@ idf_component_register(
         "jpeg_encoder.c"
         "led_heartbeat.c"
         "motor_control.c"
+        "ov7670.c"
+        "ov7670_frame.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -18,4 +20,6 @@ idf_component_register(
         esp_timer
         esp_driver_gpio
         esp_driver_ledc
+        esp_driver_i2c
+        esp_driver_cam
 )

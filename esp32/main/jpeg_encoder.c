@@ -10,6 +10,7 @@ static const char *TAG = "jpeg_enc";
 
 struct jpeg_encoder_ctx {
     jpeg_enc_handle_t handle;
+    jpeg_enc_handle_t handle_rgb565;
     int width;
     int height;
     int quality;
@@ -45,12 +46,30 @@ jpeg_encoder_t *jpeg_encoder_create(int width, int height, int quality)
     enc->height      = height;
     enc->quality     = quality;
 
+    jpeg_enc_config_t cfg565 = DEFAULT_JPEG_ENC_CONFIG();
+    cfg565.width       = width;
+    cfg565.height      = height;
+    cfg565.src_type    = JPEG_PIXEL_FORMAT_RGB565_BE;
+    cfg565.subsampling = JPEG_SUBSAMPLE_420;
+    cfg565.quality     = quality;
+    cfg565.rotate      = JPEG_ROTATE_0D;
+    cfg565.task_enable = false;
+
+    ret = jpeg_enc_open(&cfg565, &enc->handle_rgb565);
+    if (ret != JPEG_ERR_OK) {
+        ESP_LOGE(TAG, "jpeg_enc_open RGB565 failed: %d", ret);
+        jpeg_enc_close(enc->handle);
+        free(enc);
+        return NULL;
+    }
+
     int in_size = width * height * 3;
     enc->fallback_buf = jpeg_calloc_align(in_size, 16);
     enc->fallback_buf_size = in_size;
     if (!enc->fallback_buf) {
         ESP_LOGE(TAG, "failed to alloc fallback buffer");
         jpeg_enc_close(enc->handle);
+        jpeg_enc_close(enc->handle_rgb565);
         free(enc);
         return NULL;
     }
@@ -93,18 +112,7 @@ size_t jpeg_encoder_encode_rgb565(jpeg_encoder_t *enc, const uint16_t *rgb565,
                                    uint8_t *out, size_t out_max)
 {
     if (!enc || !rgb565 || !out) return 0;
-
-    jpeg_enc_config_t cfg = DEFAULT_JPEG_ENC_CONFIG();
-    cfg.width       = enc->width;
-    cfg.height      = enc->height;
-    cfg.src_type    = JPEG_PIXEL_FORMAT_RGB565_BE;
-    cfg.subsampling = JPEG_SUBSAMPLE_420;
-    cfg.quality     = enc->quality;
-    cfg.rotate      = JPEG_ROTATE_0D;
-    cfg.task_enable = false;
-
-    jpeg_enc_handle_t h565 = NULL;
-    if (jpeg_enc_open(&cfg, &h565) != JPEG_ERR_OK) return 0;
+    if (!enc->handle_rgb565) return 0;
 
     const uint8_t *src = (const uint8_t *)rgb565;
     int in_size = enc->width * enc->height * 2;
@@ -116,8 +124,7 @@ size_t jpeg_encoder_encode_rgb565(jpeg_encoder_t *enc, const uint16_t *rgb565,
         src = enc->fallback_buf;
     }
 
-    jpeg_enc_process(h565, src, in_size, out, (int)out_max, &out_len);
-    jpeg_enc_close(h565);
+    jpeg_enc_process(enc->handle_rgb565, src, in_size, out, (int)out_max, &out_len);
 
     return (size_t)out_len;
 }
@@ -126,6 +133,7 @@ void jpeg_encoder_destroy(jpeg_encoder_t *enc)
 {
     if (!enc) return;
     if (enc->handle) jpeg_enc_close(enc->handle);
+    if (enc->handle_rgb565) jpeg_enc_close(enc->handle_rgb565);
     jpeg_free_align(enc->fallback_buf);
     free(enc);
     ESP_LOGI(TAG, "encoder destroyed");

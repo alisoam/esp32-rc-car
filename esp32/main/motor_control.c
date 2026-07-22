@@ -1,4 +1,5 @@
 #include "motor_control.h"
+#include "led_heartbeat.h"
 
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
@@ -27,7 +28,7 @@
 
 #define MOTOR_DEADBAND         20
 #define MOTOR_RAMP_LIMIT       50
-#define MOTOR_WATCHDOG_MS      500
+#define MOTOR_WATCHDOG_MS      1500
 #define MOTOR_MAX_SPEED        255
 #define MOTOR_MAX_DUTY         1023
 
@@ -91,6 +92,8 @@ void motor_set(int left, int right)
     last_command_us = esp_timer_get_time();
     drive_all_locked(new_left, new_right);
     xSemaphoreGive(motor_mutex);
+
+    led_set_motor(new_left, new_right);
 }
 
 void motor_stop(void)
@@ -101,6 +104,7 @@ void motor_stop(void)
     last_command_us = esp_timer_get_time();
     drive_all_locked(0, 0);
     xSemaphoreGive(motor_mutex);
+    led_set_motor(0, 0);
 }
 
 static void motor_watchdog_task(void *arg)
@@ -126,6 +130,7 @@ static void motor_watchdog_task(void *arg)
         if (stop_needed) {
             ESP_LOGW(TAG, "watchdog: no command for %llu ms, stopping",
                      elapsed_ms);
+            led_set_motor(0, 0);
         }
     }
 }

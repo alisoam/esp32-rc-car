@@ -19,6 +19,24 @@ static void set_rgb(uint8_t r, uint8_t g, uint8_t b)
     led_strip_refresh(s_strip);
 }
 
+void led_set_motor(int left, int right)
+{
+    int abs_l = left < 0 ? -left : left;
+    int abs_r = right < 0 ? -right : right;
+    int max_speed = abs_l > abs_r ? abs_l : abs_r;
+
+    uint8_t green = 0;
+    uint8_t blue  = 0;
+
+    if (max_speed > 0) {
+        uint8_t brightness = (uint8_t)(max_speed * RGB_LED_BRIGHTNESS / 255);
+        if (left > 0 || right > 0) green = brightness;
+        if (left < 0 || right < 0) blue  = brightness;
+    }
+
+    set_rgb(0, green, blue);
+}
+
 static void heartbeat_task(void *arg)
 {
     (void)arg;

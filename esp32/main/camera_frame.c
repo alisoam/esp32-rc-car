@@ -1,4 +1,6 @@
 #include "camera_frame.h"
+#include "ov7670.h"
+#include "ov7670_frame.h"
 #include "jpeg_encoder.h"
 #include "esp_timer.h"
 #include "esp_log.h"
@@ -9,47 +11,54 @@
 
 static const char *TAG = "camera_frame";
 
-#define WIDTH  176
-#define HEIGHT 144
-#define BPP     3
+#define SYNTH_WIDTH   176
+#define SYNTH_HEIGHT  144
+#define BPP           3
 
-#define RGB_SIZE  (WIDTH * HEIGHT * BPP)
-#define JPEG_MAX  (32 * 1024)
+#define RGB_SIZE  (SYNTH_WIDTH * SYNTH_HEIGHT * BPP)
+#define JPEG_MAX  (24 * 1024)
 
-static uint8_t         *rgb_buf;
-static uint8_t         *jpg_buf;
-static jpeg_encoder_t  *jpeg_enc;
+static bool              use_real_camera;
+static uint8_t           rgb_buf[RGB_SIZE] __attribute__((aligned(16)));
+static uint8_t           synth_jpg_buf[JPEG_MAX];
+static jpeg_encoder_t   *synth_jpeg_enc;
 
 void camera_frame_init(void)
 {
-    rgb_buf = jpeg_encoder_alloc_buf(RGB_SIZE, 16);
-    assert(rgb_buf);
-    jpg_buf = malloc(JPEG_MAX);
-    assert(jpg_buf);
-    jpeg_enc = jpeg_encoder_create(WIDTH, HEIGHT, 70);
-    assert(jpeg_enc != NULL);
-    ESP_LOGI(TAG, "camera frame init ok (ESP_NEW_JPEG)");
+    synth_jpeg_enc = jpeg_encoder_create(SYNTH_WIDTH, SYNTH_HEIGHT, 70);
+    assert(synth_jpeg_enc != NULL);
+    ESP_LOGI(TAG, "synthetic camera frame init ok (ESP_NEW_JPEG)");
+}
+
+void camera_frame_init_real(void)
+{
+    if (ov7670_init() != ESP_OK) {
+        ESP_LOGW(TAG, "OV7670 not found, using synthetic frames");
+        use_real_camera = false;
+        return;
+    }
+    if (ov7670_frame_init() != ESP_OK) {
+        ESP_LOGW(TAG, "OV7670 frame capture failed, using synthetic frames");
+        use_real_camera = false;
+        return;
+    }
+    use_real_camera = true;
+    ESP_LOGI(TAG, "real camera capture active");
 }
 
 void camera_frame_deinit(void)
 {
-    if (jpeg_enc) {
-        jpeg_encoder_destroy(jpeg_enc);
-        jpeg_enc = NULL;
+    if (synth_jpeg_enc) {
+        jpeg_encoder_destroy(synth_jpeg_enc);
+        synth_jpeg_enc = NULL;
     }
-    if (rgb_buf) {
-        jpeg_encoder_free_buf(rgb_buf);
-        rgb_buf = NULL;
-    }
-    free(jpg_buf);
-    jpg_buf = NULL;
     ESP_LOGI(TAG, "camera frame deinit");
 }
 
 static inline void set_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b)
 {
-    if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
-    int off = (y * WIDTH + x) * BPP;
+    if (x < 0 || x >= SYNTH_WIDTH || y < 0 || y >= SYNTH_HEIGHT) return;
+    int off = (y * SYNTH_WIDTH + x) * BPP;
     rgb_buf[off + 0] = r;
     rgb_buf[off + 1] = g;
     rgb_buf[off + 2] = b;
@@ -189,7 +198,7 @@ static void draw_text(int x, int y, const char *text, uint8_t r, uint8_t g, uint
     }
 }
 
-camera_frame_t camera_frame_generate(int32_t left_motor, int32_t right_motor, int frame_count)
+static camera_frame_t camera_frame_generate_synthetic(int32_t left_motor, int32_t right_motor, int frame_count)
 {
     int64_t now = esp_timer_get_time();
     double elapsed = now / 1000000.0;
@@ -197,7 +206,7 @@ camera_frame_t camera_frame_generate(int32_t left_motor, int32_t right_motor, in
     uint8_t bg_r = 20 + (uint8_t)(10 * sin(elapsed * 0.3));
     uint8_t bg_g = 24 + (uint8_t)(10 * sin(elapsed * 0.5 + 1));
     uint8_t bg_b = 30 + (uint8_t)(10 * sin(elapsed * 0.4 + 2));
-    fill_rect(0, 0, WIDTH, HEIGHT, bg_r, bg_g, bg_b);
+    fill_rect(0, 0, SYNTH_WIDTH, SYNTH_HEIGHT, bg_r, bg_g, bg_b);
 
     draw_text(8, 8, "CAMERA LIVE", 79, 195, 247, 2);
 
@@ -213,13 +222,13 @@ camera_frame_t camera_frame_generate(int32_t left_motor, int32_t right_motor, in
     snprintf(buf, sizeof(buf), "FR %d", frame_count);
     draw_text(8, 62, buf, 180, 180, 180, 1);
 
-    int bx = (int)(10 + (WIDTH - 30) * (0.5 + 0.5 * sin(elapsed * 2.0)));
-    int by = (int)(HEIGHT - 30 + 10 * cos(elapsed * 1.5));
+    int bx = (int)(10 + (SYNTH_WIDTH - 30) * (0.5 + 0.5 * sin(elapsed * 2.0)));
+    int by = (int)(SYNTH_HEIGHT - 30 + 10 * cos(elapsed * 1.5));
     fill_rect(bx, by, 14, 14, 79, 195, 247);
 
     int bar_x = 8;
     int bar_y = 104;
-    int bar_w = WIDTH - 16;
+    int bar_w = SYNTH_WIDTH - 16;
     int bar_h = 10;
 
     fill_rect(bar_x, bar_y, bar_w, bar_h, 40, 40, 40);
@@ -239,10 +248,24 @@ camera_frame_t camera_frame_generate(int32_t left_motor, int32_t right_motor, in
         fill_rect(bar_x, bar_y, r_len, bar_h, 200, 0, 0);
     }
 
-    size_t out_size = jpeg_encoder_encode_rgb888(jpeg_enc, rgb_buf, jpg_buf, JPEG_MAX);
+    size_t out_size = jpeg_encoder_encode_rgb888(synth_jpeg_enc, rgb_buf, synth_jpg_buf, JPEG_MAX);
 
     camera_frame_t frame;
-    frame.data = jpg_buf;
+    frame.data = synth_jpg_buf;
     frame.size = out_size;
     return frame;
+}
+
+camera_frame_t camera_frame_generate(int32_t left_motor, int32_t right_motor, int frame_count)
+{
+    if (use_real_camera) {
+        ov7670_frame_t real = ov7670_frame_get();
+        if (real.data && real.size > 0) {
+            camera_frame_t frame;
+            frame.data = real.data;
+            frame.size = real.size;
+            return frame;
+        }
+    }
+    return camera_frame_generate_synthetic(left_motor, right_motor, frame_count);
 }

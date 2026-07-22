@@ -61,8 +61,8 @@ esp32-rc-car/
 │       ├── CMakeLists.txt
 │       ├── main.c                   # Entry point
 │       ├── wifi_ap.c / .h           # SoftAP (SSID: esp32-rc-car, IP: 192.168.4.1)
-│       ├── ov7670.c / .h            # SCCB init + register config
-│       ├── ov7670_frame.c / .h      # I2S parallel DMA, HREF/VSYNC ISRs, frame assembly
+│       ├── ov7670.c / .h            # SCCB init, I2C register config
+│       ├── ov7670_frame.c / .h       # DVP parallel DMA, double-buffer, ISR, JPEG encode
 │       ├── jpeg_encoder.c / .h      # RGB565 → JPEG conversion
 │       ├── http_server.c / .h       # MJPEG stream + motor control endpoints
 │       └── motor_control.c / .h     # LEDC PWM, tank mix, watchdog, ramping
@@ -220,20 +220,20 @@ esp32-rc-car/
 
 | Signal        | GPIO | Peripheral      | Notes                           |
 |--------------|------|-----------------|---------------------------------|
-| OV7670 D0    | 2    | I2S1 DATA[0]    | 8-bit parallel data bus         |
-| OV7670 D1    | 4    | I2S1 DATA[1]    |                                 |
-| OV7670 D2    | 12   | I2S1 DATA[2]    |                                 |
-| OV7670 D3    | 13   | I2S1 DATA[3]    |                                 |
-| OV7670 D4    | 14   | I2S1 DATA[4]    |                                 |
-| OV7670 D5    | 15   | I2S1 DATA[5]    |                                 |
-| OV7670 D6    | 16   | I2S1 DATA[6]    |                                 |
-| OV7670 D7    | 17   | I2S1 DATA[7]    | Avoid boot-strapping pins       |
-| OV7670 XCLK  | 21   | LEDC ch 4       | 10-20 MHz master clock          |
-| OV7670 PCLK  | 5    | I2S1 D_IN (WS)  | Pixel clock → I2S sample strobe |
-| OV7670 HREF  | 18   | GPIO INT        | Rising edge → line start        |
-| OV7670 VSYNC | 19   | GPIO INT        | Falling edge → frame start      |
-| OV7670 SIOC  | 22   | I2C SCL         | SCCB clock                      |
-| OV7670 SIOD  | 23   | I2C SDA         | SCCB data                       |
+| OV7670 D0    | 11   | DVP DATA[0]     | 8-bit parallel data bus         |
+| OV7670 D1    | 12   | DVP DATA[1]     |                                 |
+| OV7670 D2    | 13   | DVP DATA[2]     |                                 |
+| OV7670 D3    | 14   | DVP DATA[3]     |                                 |
+| OV7670 D4    | 15   | DVP DATA[4]     |                                 |
+| OV7670 D5    | 16   | DVP DATA[5]     |                                 |
+| OV7670 D6    | 17   | DVP DATA[6]     |                                 |
+| OV7670 D7    | 18   | DVP DATA[7]     |                                 |
+| OV7670 XCLK  | 21   | DVP XCLK out    | 10 MHz master clock             |
+| OV7670 PCLK  | 9    | DVP PCLK in     | Pixel clock from camera         |
+| OV7670 HREF  | 3    | DVP DE          | Data enable / line valid         |
+| OV7670 VSYNC | 10   | DVP VSYNC       | Frame sync                      |
+| OV7670 SIOC  | 1    | I2C SCL         | SCCB clock                      |
+| OV7670 SIOD  | 2    | I2C SDA         | SCCB data                       |
 | MX1508 IN1   | 4    | LEDC ch 0       | Left motor forward              |
 | MX1508 IN2   | 5    | LEDC ch 1       | Left motor reverse              |
 | MX1508 IN3   | 6    | LEDC ch 2       | Right motor forward             |
@@ -243,10 +243,12 @@ esp32-rc-car/
 
 #### `main.c` — Entry Point
 - Initialize NVS flash
+- Initialize LED heartbeat, motor control
+- Initialize camera (OV7670 SCCB + DVP frame capture)
 - Initialize WiFi AP (`esp32-rc-car`, open, channel 1)
 - Start the HTTP server
 - Spawn FreeRTOS tasks:
-  - `camera_task` (priority 5, core 1): camera init, I2S start, frame loop
+  - `camera_task` (priority 5, core 1): RGB565 → JPEG encode loop
   - `motor_watchdog_task` (priority 1, core 0): auto-stop after 500ms idle
 
 #### `wifi_ap.c` — WiFi Access Point
@@ -256,26 +258,31 @@ esp32-rc-car/
 - Max connections: 4
 - Uses `esp_wifi` and `esp_netif` APIs
 
-#### `ov7670.c` — Camera Initialization
-- I2C bus init at 100 kHz on GPIO 22/23
-- Probe OV7670 at SCCB address 0x21 (write) / 0x42 (read)
+#### `ov7670.c` — Camera SCCB Initialization
+- I2C bus init at 100 kHz on GPIO 1/2
+- Probe OV7670 at SCCB address 0x21
 - Write register set for QCIF (176×144) RGB565:
-  - COM7: 0x04 (QCIF), 0x0C (RGB)
+  - COM7: 0x04 (QCIF), RGB mode
   - COM15: 0xD0 (RGB565 range)
   - CLKRC: internal PLL for pixel clock
-  - Window/format registers as specified in OV7670 datasheet
-- Start LEDC clock on GPIO 21 at 10 MHz (XCLK)
+  - Window/format registers for QCIF
+
+#### `ov7670_frame.c` — DVP Camera Frame Capture
+- Uses ESP32-S3 LCD_CAM peripheral in DVP 8-bit parallel mode
+- `esp_cam_new_dvp_ctlr()` — configures DVP pins, 10 MHz XCLK out, CAM_CLK_SRC_DEFAULT
+- Input: CAM_CTLR_COLOR_RGB565, Output: CAM_CTLR_COLOR_RGB565 (no conversion)
+- Double-buffered DMA capture (raw_buf_a / raw_buf_b)
+- DMA completion ISR → `on_trans_finished` swaps buffers, signals `camera_task`
+- `camera_task` (priority 5, core 1): RGB565 → JPEG encode via ESP_NEW_JPEG
+- Encoded JPEG stored under mutex, served to HTTP stream via `camera_frame_generate()`
 
 #### `ov7670_frame.c` — I2S Parallel DMA Frame Capture
-- Configure I2S1 in parallel input mode:
-  - `I2S_COMM_FORMAT_STAND_I2S`
-  - 8-bit parallel, sample on rising PCLK
-  - DMA buffer: 2× 4096-byte descriptors, linked list
-- HREF GPIO ISR (rising edge → line active, falling edge → line done)
-- VSYNC GPIO ISR (falling edge → frame complete, swap buffer)
-- Double-buffered frame: capture fills buffer A while HTTP server reads buffer B
-- Mutex `frame_mutex` protects buffer swap
-- Output: raw RGB565 byte array, 176×144×2 = 50688 bytes per frame
+- Uses ESP32-S3 LCD_CAM peripheral in DVP (Digital Video Port) 8-bit parallel mode
+- `esp_cam_new_dvp_ctlr()` configures DVP pins, generates 10 MHz XCLK
+- DMA-backed double-buffered capture (raw_buf_a / raw_buf_b)
+- DMA EOF ISR → `on_trans_finished` swaps buffers, signals `camera_task` via semaphore
+- `camera_task` (core 1, priority 5): RGB565 → JPEG encode, stores result under mutex
+- Output: JPEG frames served to `/stream` endpoint
 
 #### `jpeg_encoder.c` — RGB888 → JPEG (ESP_NEW_JPEG v1.0.2)
 - Uses [ESP_NEW_JPEG](https://components.espressif.com/components/espressif/esp_new_jpeg) — SIMD-accelerated codec with ASM optimization on ESP32-S3
@@ -346,7 +353,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 - [ ] ESP32 boots, creates `esp32-rc-car` WiFi network
 - [ ] OV7670 initializes, I2C probe returns ACK
-- [ ] I2S DMA captures raw frames without buffer overrun
+- [ ] DVP DMA captures raw frames without buffer overrun
 - [ ] JPEG encoding produces valid images (verify via `/stream` in browser)
 - [ ] `/control?l=100&r=100&s=1` drives both motors forward
 - [ ] `/control?l=0&r=0&s=2` stops motors
@@ -372,6 +379,6 @@ idf.py -p /dev/ttyUSB0 flash monitor
 6. **[done]** **ESP32: WiFi AP** — get network up, verify connection from phone
 7. **[done]** **ESP32: Motor control** — `motor_control.c`, test with `/control` from browser
 8. **[done]** **ESP32: HTTP server skeleton** — `/status` + `/control` + `/stream` stubs (seq dedup live)
-9. **ESP32: OV7670 driver** — I2C init, I2S DMA, frame capture (NEXT)
+9.  **[done]** **ESP32: OV7670 driver** — I2C SCCB init + DVP frame capture (via LCD_CAM peripheral), HW JPEG encoding, double-buffered DMA
 10. **[done]** **ESP32: HW JPEG encoder** — integrated with ESP32-S3 hardware peripheral, `/stream` delivers MJPEG to app and desktop browser
 11. **End-to-end test** — drive the car via WiFi with video feed

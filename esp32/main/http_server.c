@@ -12,168 +12,168 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include <errno.h>
-
-#define STREAM_BOUNDARY "FRAME"
 
 volatile int32_t  motor_left_speed  = 0;
 volatile int32_t  motor_right_speed = 0;
 volatile uint64_t last_control_seq  = 0;
-volatile int      stream_clients    = 0;
 
 static const char *TAG = "http_server";
-static int64_t     start_time_us = 0;
 
-static esp_err_t status_handler(httpd_req_t *req)
+static struct {
+    httpd_handle_t hd;
+    int            fd;
+    bool           active;
+    int            generation;
+    SemaphoreHandle_t lock;
+} ws_state = { .fd = -1, .active = false, .generation = 0 };
+
+static void set_motor(int32_t l, int32_t r, uint64_t s)
 {
-    int64_t uptime = (esp_timer_get_time() - start_time_us) / 1000000;
-    char resp[256];
-    int n = snprintf(resp, sizeof(resp),
-        "{\"fps\":0,\"clients\":%d,\"uptime\":%" PRId64 ",\"left\":%" PRId32 ",\"right\":%" PRId32 ",\"resolution\":\"176x144\"}",
-        stream_clients, uptime, motor_left_speed, motor_right_speed);
-    if (n < 0 || n >= sizeof(resp)) {
-        httpd_resp_send_500(req);
-        return ESP_FAIL;
-    }
-
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, resp);
-    return ESP_OK;
-}
-
-static esp_err_t control_handler(httpd_req_t *req)
-{
-    char buf[128];
-    if (httpd_req_get_url_query_str(req, buf, sizeof(buf)) != ESP_OK) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing params");
-        return ESP_FAIL;
-    }
-
-    char param[32];
-    int32_t  l = 0;
-    int32_t  r = 0;
-    uint64_t s = 0;
-
-    if (httpd_query_key_value(buf, "l", param, sizeof(param)) == ESP_OK) {
-        l = atoi(param);
-    }
-    if (httpd_query_key_value(buf, "r", param, sizeof(param)) == ESP_OK) {
-        r = atoi(param);
-    }
-    if (httpd_query_key_value(buf, "s", param, sizeof(param)) == ESP_OK) {
-        errno = 0;
-        s = strtoull(param, NULL, 10);
-        if (errno == ERANGE) {
-            s = 0;
-        }
-    }
-
-    l = MAX(-255, MIN(255, l));
-    r = MAX(-255, MIN(255, r));
-
-    if (s != 0 && s <= last_control_seq) {
-        ESP_LOGW(TAG, "stale seq=%llu dropped", s);
-        httpd_resp_sendstr(req, "stale");
-        return ESP_OK;
-    }
-    if (s != 0) {
-        last_control_seq = s;
-    }
+    if (s != 0 && s <= last_control_seq) return;
+    if (s != 0) last_control_seq = s;
     motor_left_speed  = l;
     motor_right_speed = r;
     motor_set(l, r);
-
-    ESP_LOGI(TAG, "control: L=%" PRId32 " R=%" PRId32 " s=%llu", l, r, s);
-
-    httpd_resp_sendstr(req, "ok");
-    return ESP_OK;
 }
 
-static void stream_task(void *arg)
+static void ws_stream_task(void *arg)
 {
-    httpd_req_t *req = (httpd_req_t *)arg;
+    (void)arg;
     int frame_count = 0;
+    int my_generation;
 
-    char header_buf[256];
+    xSemaphoreTake(ws_state.lock, portMAX_DELAY);
+    my_generation = ws_state.generation;
+    xSemaphoreGive(ws_state.lock);
 
     while (1) {
+        xSemaphoreTake(ws_state.lock, portMAX_DELAY);
+        bool active = ws_state.active;
+        httpd_handle_t hd = ws_state.hd;
+        int fd = ws_state.fd;
+        int gen = ws_state.generation;
+        xSemaphoreGive(ws_state.lock);
+
+        if (!active || gen != my_generation) break;
+
         camera_frame_t frame = camera_frame_generate(
             motor_left_speed, motor_right_speed, frame_count);
 
-        int header_len = snprintf(header_buf, sizeof(header_buf),
-            "--" STREAM_BOUNDARY "\r\n"
-            "Content-Type: image/jpeg\r\n"
-            "Content-Length: %d\r\n"
-            "\r\n",
-            (int)frame.size);
+        if (frame.size > 0) {
+            httpd_ws_frame_t ws_pkt;
+            memset(&ws_pkt, 0, sizeof(ws_pkt));
+            ws_pkt.type = HTTPD_WS_TYPE_BINARY;
+            ws_pkt.payload = frame.data;
+            ws_pkt.len = frame.size;
+            if (httpd_ws_send_frame_async(hd, fd, &ws_pkt) != ESP_OK) break;
+        }
 
-        esp_err_t err = httpd_resp_send_chunk(req, header_buf, header_len);
-        if (err != ESP_OK) break;
+        char status[64];
+        int status_len = snprintf(status, sizeof(status),
+            "{\"l\":%" PRId32 ",\"r\":%" PRId32 "}",
+            motor_left_speed, motor_right_speed);
+        if (status_len > 0 && status_len < (int)sizeof(status)) {
+            httpd_ws_frame_t txt_pkt;
+            memset(&txt_pkt, 0, sizeof(txt_pkt));
+            txt_pkt.type = HTTPD_WS_TYPE_TEXT;
+            txt_pkt.payload = (uint8_t *)status;
+            txt_pkt.len = status_len;
+            if (httpd_ws_send_frame_async(hd, fd, &txt_pkt) != ESP_OK) break;
+        }
 
-        err = httpd_resp_send_chunk(req, (const char *)frame.data, frame.size);
-        if (err != ESP_OK) break;
+        if (frame_count % 5 == 0) {
+            httpd_ws_frame_t ping_pkt;
+            memset(&ping_pkt, 0, sizeof(ping_pkt));
+            ping_pkt.type = HTTPD_WS_TYPE_PING;
+            if (httpd_ws_send_frame_async(hd, fd, &ping_pkt) != ESP_OK) break;
+        }
 
         frame_count++;
-        vTaskDelay(pdMS_TO_TICKS(66));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
-    httpd_req_async_handler_complete(req);
-    stream_clients--;
-    ESP_LOGI(TAG, "stream client disconnected (total: %d)", stream_clients);
+    ESP_LOGI(TAG, "ws stream gen=%d exiting", my_generation);
     vTaskDelete(NULL);
 }
 
-static esp_err_t stream_handler(httpd_req_t *req)
+static esp_err_t ws_post_handshake_cb(httpd_req_t *req)
 {
-    stream_clients++;
+    xSemaphoreTake(ws_state.lock, portMAX_DELAY);
+    ws_state.active = false;
+    ws_state.generation++;
+    ws_state.hd = req->handle;
+    ws_state.fd = httpd_req_to_sockfd(req);
+    ws_state.active = true;
+    xSemaphoreGive(ws_state.lock);
 
-    httpd_resp_set_type(req, "multipart/x-mixed-replace; boundary=" STREAM_BOUNDARY);
-    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-
-    ESP_LOGI(TAG, "stream client connected (total: %d)", stream_clients);
-
-    httpd_req_t *async_req = NULL;
-    esp_err_t err = httpd_req_async_handler_begin(req, &async_req);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "async handler begin failed");
-        stream_clients--;
-        httpd_resp_send_500(req);
+    BaseType_t ret = xTaskCreate(ws_stream_task, "ws_stream", 4096, NULL, 4, NULL);
+    if (ret != pdPASS) {
+        xSemaphoreTake(ws_state.lock, portMAX_DELAY);
+        ws_state.active = false;
+        ws_state.hd = NULL;
+        ws_state.fd = -1;
+        xSemaphoreGive(ws_state.lock);
+        ESP_LOGE(TAG, "ws stream task create failed");
         return ESP_FAIL;
     }
+    ESP_LOGI(TAG, "ws connected gen=%d", ws_state.generation);
+    return ESP_OK;
+}
 
-    BaseType_t ret = xTaskCreate(stream_task, "stream", 16384, async_req, 5, NULL);
-    if (ret != pdPASS) {
-        ESP_LOGE(TAG, "failed to create stream task");
-        stream_clients--;
-        httpd_req_async_handler_complete(async_req);
-        return ESP_FAIL;
+static esp_err_t ws_handler(httpd_req_t *req)
+{
+    httpd_ws_frame_t ws_pkt;
+    memset(&ws_pkt, 0, sizeof(ws_pkt));
+    esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
+    if (ret != ESP_OK) goto disconnect;
+
+    if (ws_pkt.type == HTTPD_WS_TYPE_CLOSE) goto disconnect;
+
+    if (ws_pkt.type == HTTPD_WS_TYPE_TEXT && ws_pkt.len > 0 && ws_pkt.len < 64) {
+        char buf[64];
+        ws_pkt.payload = (uint8_t *)buf;
+        ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
+        if (ret != ESP_OK) goto disconnect;
+        buf[ws_pkt.len] = '\0';
+
+        int32_t l = 0, r = 0;
+        uint64_t s = 0;
+        char *end = NULL;
+        l = (int32_t)strtol(buf, &end, 10);
+        if (end && *end == ',') {
+            r = (int32_t)strtol(end + 1, &end, 10);
+            if (end && *end == ',') s = strtoull(end + 1, NULL, 10);
+        }
+        set_motor(MAX(-255, MIN(255, l)), MAX(-255, MIN(255, r)), s);
     }
 
     return ESP_OK;
+
+disconnect:
+    xSemaphoreTake(ws_state.lock, portMAX_DELAY);
+    ws_state.active = false;
+    xSemaphoreGive(ws_state.lock);
+    ESP_LOGI(TAG, "ws disconnected");
+    return ret;
 }
 
 static const httpd_uri_t uri_handlers[] = {
     {
-        .uri      = "/status",
+        .uri      = "/ws",
         .method   = HTTP_GET,
-        .handler  = status_handler,
-    },
-    {
-        .uri      = "/control",
-        .method   = HTTP_GET,
-        .handler  = control_handler,
-    },
-    {
-        .uri      = "/stream",
-        .method   = HTTP_GET,
-        .handler  = stream_handler,
+        .handler  = ws_handler,
+        .is_websocket = true,
+        .ws_post_handshake_cb = ws_post_handshake_cb,
     },
 };
 
 void http_server_start(void)
 {
-    start_time_us = esp_timer_get_time();
+    ws_state.lock = xSemaphoreCreateMutex();
+    assert(ws_state.lock);
+
     camera_frame_init();
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -181,6 +181,9 @@ void http_server_start(void)
     config.max_open_sockets = 5;
     config.lru_purge_enable = true;
     config.max_uri_handlers = 8;
+    config.task_priority    = 7;
+    config.recv_wait_timeout = 1;
+    config.send_wait_timeout = 1;
 
     httpd_handle_t server = NULL;
     ESP_ERROR_CHECK(httpd_start(&server, &config));
@@ -189,5 +192,5 @@ void http_server_start(void)
         ESP_ERROR_CHECK(httpd_register_uri_handler(server, &uri_handlers[i]));
     }
 
-    ESP_LOGI(TAG, "HTTP server started on port %d", config.server_port);
+    ESP_LOGI(TAG, "server ready: WS /ws");
 }

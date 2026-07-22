@@ -11,8 +11,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.esp32rc.model.MotorCommand
-import com.esp32rc.network.MjpegStreamer
-import com.esp32rc.network.MotorClient
+import com.esp32rc.network.WsClient
 import com.esp32rc.ui.JoystickView
 
 class ControlActivity : AppCompatActivity() {
@@ -27,9 +26,10 @@ class ControlActivity : AppCompatActivity() {
     private lateinit var videoView: ImageView
     private lateinit var statusText: TextView
     private lateinit var joystick: JoystickView
+    private lateinit var motorLeft: TextView
+    private lateinit var motorRight: TextView
 
-    private var streamer: MjpegStreamer? = null
-    private var motorClient: MotorClient? = null
+    private var wsClient: WsClient? = null
 
     private val commandHandler = Handler(Looper.getMainLooper())
     private var pendingCommand = MotorCommand.STOP
@@ -49,14 +49,13 @@ class ControlActivity : AppCompatActivity() {
         val changed = command != lastSentCommand
         if (!changed && !keepAlive) return
         if (changed && !keepAlive && now - lastCommandTime < MIN_SEND_INTERVAL_MS) return
-        motorClient?.sendCommand(command.left, command.right)
+        wsClient?.sendCommand(command.left, command.right)
         lastSentCommand = command
         lastCommandTime = now
     }
 
     private val ip: String by lazy { intent.getStringExtra(EXTRA_IP) ?: "192.168.4.1" }
     private val port: Int by lazy { intent.getIntExtra(EXTRA_PORT, 80) }
-    private val baseUrl: String by lazy { "http://$ip:$port" }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,6 +64,8 @@ class ControlActivity : AppCompatActivity() {
         videoView = findViewById(R.id.videoView)
         statusText = findViewById(R.id.statusText)
         joystick = findViewById(R.id.joystick)
+        motorLeft = findViewById(R.id.motorLeft)
+        motorRight = findViewById(R.id.motorRight)
 
         hideSystemBars()
 
@@ -76,29 +77,28 @@ class ControlActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        motorClient = MotorClient(baseUrl)
-        startStream()
+        startWs()
         commandHandler.post(commandTicker)
     }
 
     override fun onPause() {
         super.onPause()
         commandHandler.removeCallbacks(commandTicker)
-        motorClient?.sendCommand(0, 0)
-        stopStream()
+        wsClient?.sendCommand(0, 0)
+        stopWs()
     }
 
     override fun onStop() {
         super.onStop()
-        motorClient?.shutdown()
-        motorClient = null
+        wsClient?.shutdown()
+        wsClient = null
     }
 
-    private fun startStream() {
+    private fun startWs() {
         statusText.visibility = View.VISIBLE
         statusText.text = getString(R.string.status_connecting)
-        streamer = MjpegStreamer(
-            url = "$baseUrl/stream",
+        wsClient = WsClient(
+            wsUrl = "ws://$ip:$port/ws",
             onFrame = { bitmap ->
                 statusText.visibility = View.GONE
                 videoView.setImageBitmap(bitmap)
@@ -106,13 +106,17 @@ class ControlActivity : AppCompatActivity() {
             onError = {
                 statusText.visibility = View.VISIBLE
                 statusText.text = getString(R.string.status_no_signal)
+            },
+            onStatus = { left, right ->
+                motorLeft.text = "L $left"
+                motorRight.text = "R $right"
             }
-        ).also { it.start() }
+        ).also { it.connect() }
     }
 
-    private fun stopStream() {
-        streamer?.stopStream()
-        streamer = null
+    private fun stopWs() {
+        wsClient?.disconnect()
+        wsClient = null
     }
 
     private fun hideSystemBars() {

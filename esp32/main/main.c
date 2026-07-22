@@ -8,6 +8,7 @@
 #include "http_server.h"
 #include "led_heartbeat.h"
 #include "motor_control.h"
+#include "camera_frame.h"
 
 static const char *TAG = "main";
 
@@ -24,6 +25,8 @@ void app_main(void)
 
     led_heartbeat_init();
     motor_control_init();
+    camera_frame_init_real();
+
     wifi_ap_init();
     http_server_start();
 
